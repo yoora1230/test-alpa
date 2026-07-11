@@ -1,131 +1,51 @@
-from __future__ import annotations
-
 import pandas as pd
 import streamlit as st
 
-from utils import apply_common_style, calculate_predictions, init_state
+from common import SUBJECTS, current_expected_scores, init_state
 
-st.set_page_config(page_title="예상 점수", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="현재 예상점수", page_icon="🎯", layout="wide")
 init_state()
-apply_common_style()
 
-st.title("🎯 현재 예상점수")
-st.caption("최근 모의고사 성적과 오답 복습 상태를 조합한 학습 참고용 추정치입니다.")
+st.title("🎯 현재 나의 예상점수")
+st.caption("최근 최대 3회의 모의고사 성적, 최근 추세, 미해결 오답 수를 바탕으로 계산한 참고용 점수입니다.")
 
-predictions = calculate_predictions(
-    st.session_state.scores,
-    st.session_state.wrong_answers,
+expected_df = current_expected_scores(
+    st.session_state.mock_scores,
+    st.session_state.wrong_questions,
 )
 
-if predictions.empty:
-    st.warning("예상점수를 계산하려면 먼저 모의고사 점수를 한 번 이상 입력하세요.")
-else:
-    target_score = st.slider(
-        "목표 평균 점수",
-        min_value=0,
-        max_value=100,
-        value=85,
+metric_cols = st.columns(len(SUBJECTS))
+for idx, row in expected_df.iterrows():
+    metric_cols[idx].metric(
+        row["과목"],
+        f"{row['현재 예상점수']:.1f}점",
+        f"미해결 {int(row['미해결 오답'])}개",
+        delta_color="off",
     )
 
-    expected_average = float(predictions["예상점수"].mean())
-    latest_average = float(predictions["최근 점수"].mean())
-    gap = expected_average - target_score
+st.subheader("예상점수 비교")
+chart_df = expected_df.set_index("과목")[["최근 3회 평균", "현재 예상점수"]]
+st.bar_chart(chart_df)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric(
-        "예상 평균",
-        f"{expected_average:.1f}점",
-        delta=f"최근 점수 평균 대비 {expected_average - latest_average:+.1f}점",
+st.subheader("계산 결과")
+st.dataframe(expected_df, hide_index=True, use_container_width=True)
+
+weakest = expected_df.sort_values(["현재 예상점수", "미해결 오답"], ascending=[True, False]).iloc[0]
+strongest = expected_df.sort_values("현재 예상점수", ascending=False).iloc[0]
+
+col1, col2 = st.columns(2)
+with col1:
+    st.warning(
+        f"우선 보완 과목: **{weakest['과목']}** · 예상 {weakest['현재 예상점수']:.1f}점 · "
+        f"미해결 오답 {int(weakest['미해결 오답'])}개"
     )
-    m2.metric("최근 점수 평균", f"{latest_average:.1f}점")
-    m3.metric(
-        "목표와의 차이",
-        f"{abs(gap):.1f}점",
-        delta="목표 이상" if gap >= 0 else "목표까지 남음",
-        delta_color="normal" if gap >= 0 else "inverse",
-    )
+with col2:
+    st.success(f"현재 강점 과목: **{strongest['과목']}** · 예상 {strongest['현재 예상점수']:.1f}점")
 
-    st.subheader("과목별 예상점수")
-    chart_data = predictions.set_index("과목")[["최근 점수", "예상점수"]]
-    st.bar_chart(chart_data, y_label="점수")
+st.info(
+    "계산식: 최근 3회 평균 + 최근 점수 변화의 35% − 미해결 오답 1개당 0.8점(최대 12점). "
+    "실제 시험 점수를 보장하는 예측 모델이 아니라 학습 우선순위를 정하기 위한 참고 지표입니다."
+)
 
-    display_columns = [
-        "과목",
-        "최근 점수",
-        "최근 가중평균",
-        "추세 보정",
-        "오답 보정",
-        "변동성 보정",
-        "예상점수",
-        "예상 범위",
-        "시험 수",
-        "미해결 오답",
-    ]
-    st.dataframe(
-        predictions[display_columns],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "최근 점수": st.column_config.NumberColumn(format="%.1f점"),
-            "최근 가중평균": st.column_config.NumberColumn(format="%.1f점"),
-            "추세 보정": st.column_config.NumberColumn(format="%+.1f점"),
-            "오답 보정": st.column_config.NumberColumn(format="%+.1f점"),
-            "변동성 보정": st.column_config.NumberColumn(format="%+.1f점"),
-            "예상점수": st.column_config.ProgressColumn(
-                "예상점수",
-                min_value=0,
-                max_value=100,
-                format="%.1f점",
-            ),
-        },
-    )
-
-    st.subheader("지금 우선할 공부")
-    recommendations: list[str] = []
-
-    low_subjects = predictions.nsmallest(min(3, len(predictions)), "예상점수")
-    if not low_subjects.empty:
-        subject_text = ", ".join(low_subjects["과목"].astype(str).tolist())
-        recommendations.append(f"예상점수가 낮은 **{subject_text}**를 우선 배치하세요.")
-
-    unresolved = predictions[predictions["미해결 오답"] > 0].sort_values(
-        "미해결 오답", ascending=False
-    )
-    if not unresolved.empty:
-        top = unresolved.iloc[0]
-        recommendations.append(
-            f"**{top['과목']}**의 미해결 오답이 {int(top['미해결 오답'])}개이므로 오답 복습 시간을 확보하세요."
-        )
-
-    negative_trend = predictions[predictions["추세 보정"] < 0].sort_values("추세 보정")
-    if not negative_trend.empty:
-        subject_text = ", ".join(negative_trend["과목"].astype(str).tolist())
-        recommendations.append(
-            f"최근 하락 추세가 있는 **{subject_text}**는 다음 모의고사 전에 원인을 점검하세요."
-        )
-
-    if expected_average >= target_score:
-        recommendations.append(
-            "현재 추정 평균은 목표 이상입니다. 새 내용을 무리하게 늘리기보다 실수 방지와 복습 유지에 집중하세요."
-        )
-    else:
-        recommendations.append(
-            f"목표 평균까지 약 **{target_score - expected_average:.1f}점** 남았습니다. 낮은 과목의 개념 복습과 오답 재풀이를 먼저 진행하세요."
-        )
-
-    for recommendation in recommendations:
-        st.write(f"- {recommendation}")
-
-    with st.expander("예상점수 계산 방식 보기"):
-        st.markdown(
-            """
-            과목별 예상점수는 다음 요소를 이용합니다.
-
-            - 최근 최대 5회의 **최근 가중평균**: 최근 시험일수록 더 큰 비중을 둡니다.
-            - **성적 추세 보정**: 최근 점수가 상승하면 가산하고, 하락하면 감산합니다.
-            - **오답 보정**: 오답 복습 완료 비율이 높으면 가산하고, 미해결 오답이 많으면 감산합니다.
-            - **변동성 보정**: 점수 변화가 클수록 불확실성이 크다고 보고 소폭 감산합니다.
-
-            이 계산은 통계적 예측 모델이나 학교의 공식 산출 방식이 아니며, 입력된 데이터가 적을수록 실제 결과와 차이가 커질 수 있습니다.
-            """
-        )
+if st.session_state.mock_scores.empty:
+    st.warning("모의고사 성적이 없어 과목별 기본값 70점을 사용했습니다. 먼저 성적을 입력하면 더 알맞게 계산됩니다.")
